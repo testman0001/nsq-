@@ -38,26 +38,26 @@ type errStore struct {
 
 type NSQD struct {
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
-	clientIDSequence int64
+	clientIDSequence int64 // 客户端id
 
-	sync.RWMutex
-	ctx context.Context
+	sync.RWMutex                 // 读写锁
+	ctx          context.Context // 上下文，此处用来传递取消信号，停止所有派生工作
 	// ctxCancel cancels a context that main() is waiting on
 	ctxCancel context.CancelFunc
 
-	opts atomic.Value
+	opts atomic.Value //配置信息
 
-	dl        *dirlock.DirLock
-	isLoading int32
-	isExiting int32
-	errValue  atomic.Value
-	startTime time.Time
+	dl        *dirlock.DirLock //目录锁
+	isLoading int32            //标志正在加载元数据
+	isExiting int32            //标志正在退出
+	errValue  atomic.Value     //错误信息
+	startTime time.Time        //启动时间
 
-	topicMap map[string]*Topic
+	topicMap map[string]*Topic //topic集合
 
-	lookupPeers atomic.Value
+	lookupPeers atomic.Value //lookupd对端
 
-	tcpServer     *tcpServer
+	tcpServer     *tcpServer // 管理客户端连接，主要是handle接口
 	tcpListener   net.Listener
 	httpListener  net.Listener
 	httpsListener net.Listener
@@ -65,14 +65,15 @@ type NSQD struct {
 
 	poolSize int
 
-	notifyChan           chan interface{}
-	optsNotificationChan chan struct{}
-	exitChan             chan int
-	waitGroup            util.WaitGroupWrapper
+	notifyChan           chan interface{}      // 向所有nsqlookupd发送topic相关消息
+	optsNotificationChan chan struct{}         // 传递nsqlookupd变化的消息
+	exitChan             chan int              // 传递退出消息
+	waitGroup            util.WaitGroupWrapper //Exit函数中通过waitGroup.Wait()等待所有协程退出，每个协程启动时由wrapper加入
 
 	ci *clusterinfo.ClusterInfo
 }
 
+// nsqd初始化工作
 func New(opts *Options) (*NSQD, error) {
 	var err error
 
@@ -93,7 +94,13 @@ func New(opts *Options) (*NSQD, error) {
 		optsNotificationChan: make(chan struct{}, 1),
 		dl:                   dirlock.New(dataPath),
 	}
+
+	// context初始化
+	// context.Background() 函数返回一个非 nil 的空 Context作为根使用
+	// context.WithCancel(）接收一个父 Context，返回一个新的子 Context 和一个context的取消函数
+	// n.ctxCancel将在nsqd退出时被调用，并且其衍生的context都将被取消
 	n.ctx, n.ctxCancel = context.WithCancel(context.Background())
+	// http客户端，用来从lookupd查询信息
 	httpcli := http_api.NewClient(nil, opts.HTTPClientConnectTimeout, opts.HTTPClientRequestTimeout)
 	n.ci = clusterinfo.New(n.logf, httpcli)
 
@@ -102,6 +109,7 @@ func New(opts *Options) (*NSQD, error) {
 	n.swapOpts(opts)
 	n.errValue.Store(errStore{})
 
+	// 对目录加锁
 	err = n.dl.Lock()
 	if err != nil {
 		return nil, fmt.Errorf("failed to lock data-path: %v", err)
@@ -244,6 +252,7 @@ func (n *NSQD) GetStartTime() time.Time {
 }
 
 func (n *NSQD) Main() error {
+	// 创建管道及异常处理函数，接收退出信息
 	exitCh := make(chan error)
 	var once sync.Once
 	exitFunc := func(err error) {
@@ -255,24 +264,31 @@ func (n *NSQD) Main() error {
 		})
 	}
 
+	// 创建tcp服务器，有异常时传到exitCh，促使main函数退出
+	// n.tcpServer 的handle函数处理面向生产者和消费者的tcp连接，并创建IOLoop提供服务
 	n.waitGroup.Wrap(func() {
 		exitFunc(protocol.TCPServer(n.tcpListener, n.tcpServer, n.logf))
 	})
 	if n.httpListener != nil {
+		// 创建http服务器，提供http api如消息投递
 		httpServer := newHTTPServer(n, false, n.getOpts().TLSRequired == TLSRequired)
 		n.waitGroup.Wrap(func() {
 			exitFunc(http_api.Serve(n.httpListener, httpServer, "HTTP", n.logf))
 		})
 	}
 	if n.httpsListener != nil {
+		// 创建https服务器
 		httpsServer := newHTTPServer(n, true, true)
 		n.waitGroup.Wrap(func() {
 			exitFunc(http_api.Serve(n.httpsListener, httpsServer, "HTTPS", n.logf))
 		})
 	}
 
+	// 另起一个协程，扫描处理队列
 	n.waitGroup.Wrap(n.queueScanLoop)
+	// 节点信息管理，监听topic、channel信息上报给nsqlookupd，同时保持心跳
 	n.waitGroup.Wrap(n.lookupLoop)
+	// 输出统计信息到指定的地址（udp连接）
 	if n.getOpts().StatsdAddress != "" {
 		n.waitGroup.Wrap(n.statsdLoop)
 	}
@@ -449,22 +465,27 @@ func (n *NSQD) Exit() {
 		n.httpsListener.Close()
 	}
 
+	// 持久化元数据
 	n.Lock()
 	err := n.PersistMetadata()
 	if err != nil {
 		n.logf(LOG_ERROR, "failed to persist metadata - %s", err)
 	}
 	n.logf(LOG_INFO, "NSQ: closing topics")
+	// 关闭所有topic
 	for _, topic := range n.topicMap {
 		topic.Close()
 	}
 	n.Unlock()
 
 	n.logf(LOG_INFO, "NSQ: stopping subsystems")
+	// 传递退出消息给其他协程
 	close(n.exitChan)
+	// 等待所有协程退出
 	n.waitGroup.Wait()
 	n.dl.Unlock()
 	n.logf(LOG_INFO, "NSQ: bye")
+	// 取消context
 	n.ctxCancel()
 }
 
@@ -472,6 +493,7 @@ func (n *NSQD) Exit() {
 // to return a pointer to a Topic object (potentially new)
 func (n *NSQD) GetTopic(topicName string) *Topic {
 	// most likely we already have this topic, so try read lock first
+	// 第一次加读锁，如果topic存在，则正常返回topic
 	n.RLock()
 	t, ok := n.topicMap[topicName]
 	n.RUnlock()
@@ -479,9 +501,11 @@ func (n *NSQD) GetTopic(topicName string) *Topic {
 		return t
 	}
 
+	// 如果topic上次不存在，直接再加写锁，重新查一遍，避免高并发场景读锁释放后又创建出来topic
 	n.Lock()
 
 	t, ok = n.topicMap[topicName]
+	// 此时突然查到，可以直接返回
 	if ok {
 		n.Unlock()
 		return t
@@ -489,9 +513,11 @@ func (n *NSQD) GetTopic(topicName string) *Topic {
 	deleteCallback := func(t *Topic) {
 		n.DeleteExistingTopic(t.name)
 	}
+	// 正常重新创建topic
 	t = NewTopic(topicName, n, deleteCallback)
 	n.topicMap[topicName] = t
 
+	// 解除写锁
 	n.Unlock()
 
 	n.logf(LOG_INFO, "TOPIC(%s): created", t.name)
@@ -499,12 +525,14 @@ func (n *NSQD) GetTopic(topicName string) *Topic {
 
 	// if this topic was created while loading metadata at startup don't do any further initialization
 	// (topic will be "started" after loading completes)
+	// 如果是加载过程中创建的topic，不需要做其他操作，加载完会统一执行
 	if atomic.LoadInt32(&n.isLoading) == 1 {
 		return t
 	}
 
 	// if using lookupd, make a blocking call to get channels and immediately create them
 	// to ensure that all channels receive published messages
+	// 在所有lookupd地址中查询topic对应的非临时channel，并创建
 	lookupdHTTPAddrs := n.lookupdHTTPAddrs()
 	if len(lookupdHTTPAddrs) > 0 {
 		channelNames, err := n.ci.GetLookupdTopicChannels(t.name, lookupdHTTPAddrs)
@@ -562,6 +590,7 @@ func (n *NSQD) DeleteExistingTopic(topicName string) error {
 	return nil
 }
 
+// 在topic及channel变化时调用（比如删除），变化对象写入channel（通知到lookupd），并将元数据持久化
 func (n *NSQD) Notify(v interface{}, persist bool) {
 	// since the in-memory metadata is incomplete,
 	// should not persist metadata while loading it.
@@ -604,6 +633,8 @@ func (n *NSQD) channels() []*Channel {
 // resizePool adjusts the size of the pool of queueScanWorker goroutines
 //
 //	1 <= pool <= min(num * 0.25, QueueScanWorkerPoolMax)
+//
+// 根据num参数调整queueScanWorker的数目
 func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, closeCh chan int) {
 	idealPoolSize := int(float64(num) * 0.25)
 	if idealPoolSize < 1 {
@@ -616,6 +647,7 @@ func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, c
 			break
 		} else if idealPoolSize < n.poolSize {
 			// contract
+			// 收缩协程池，关闭信号只会被一个协程读取到
 			closeCh <- 1
 			n.poolSize--
 		} else {
@@ -636,13 +668,16 @@ func (n *NSQD) queueScanWorker(workCh chan *Channel, responseCh chan bool, close
 		case c := <-workCh:
 			now := time.Now().UnixNano()
 			dirty := false
+			// InFlightQueue-存放处理中的消息，客户端未响应消费
 			if c.processInFlightQueue(now) {
 				dirty = true
 			}
+			// DeferredQueue-延迟队列，消息收到req响应后重新入队，指定时刻重新投递
 			if c.processDeferredQueue(now) {
 				dirty = true
 			}
 			responseCh <- dirty
+		// 收到关闭信号后退出
 		case <-closeCh:
 			return
 		}

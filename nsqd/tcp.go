@@ -23,12 +23,14 @@ type tcpServer struct {
 	conns sync.Map
 }
 
+// tcpServer真正的处理函数
 func (p *tcpServer) Handle(conn net.Conn) {
 	p.nsqd.logf(LOG_INFO, "TCP: new client(%s)", conn.RemoteAddr())
 
 	// The client should initialize itself by sending a 4 byte sequence indicating
 	// the version of the protocol that it intends to communicate, this will allow us
 	// to gracefully upgrade the protocol away from text/line oriented to whatever...
+	// 解析客户端的协议版本，仅接受v2
 	buf := make([]byte, 4)
 	_, err := io.ReadFull(conn, buf)
 	if err != nil {
@@ -45,6 +47,7 @@ func (p *tcpServer) Handle(conn net.Conn) {
 	switch protocolMagic {
 	case "  V2":
 		prot = &protocolV2{nsqd: p.nsqd}
+	// 其他版本协议直接关闭连接
 	default:
 		protocol.SendFramedResponse(conn, frameTypeError, []byte("E_BAD_PROTOCOL"))
 		conn.Close()
@@ -53,9 +56,11 @@ func (p *tcpServer) Handle(conn net.Conn) {
 		return
 	}
 
+	// 初始化客户端实例
 	client := prot.NewClient(conn)
 	p.conns.Store(conn.RemoteAddr(), client)
 
+	// 创建一个IOLoop进行处理
 	err = prot.IOLoop(client)
 	if err != nil {
 		p.nsqd.logf(LOG_ERROR, "client(%s) - %s", conn.RemoteAddr(), err)

@@ -10,6 +10,8 @@ import (
 	"github.com/nsqio/nsq/internal/lg"
 )
 
+// 定义TCPHandler，只要实现了Handle(net.Conn)即认为是TCPHandler类型
+// 和鸭子类型一样，用来实现多态
 type TCPHandler interface {
 	Handle(net.Conn)
 }
@@ -20,6 +22,7 @@ func TCPServer(listener net.Listener, handler TCPHandler, logf lg.AppLogFunc) er
 	var wg sync.WaitGroup
 
 	for {
+		// 循环接受tcp连接
 		clientConn, err := listener.Accept()
 		if err != nil {
 			// net.Error.Temporary() is deprecated, but is valid for accept
@@ -36,6 +39,7 @@ func TCPServer(listener net.Listener, handler TCPHandler, logf lg.AppLogFunc) er
 			break
 		}
 
+		// 对每个连接调用handle函数创建协程进行处理
 		wg.Add(1)
 		go func() {
 			handler.Handle(clientConn)

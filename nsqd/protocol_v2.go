@@ -32,7 +32,9 @@ type protocolV2 struct {
 }
 
 func (p *protocolV2) NewClient(conn net.Conn) protocol.Client {
+	// 生成客户端id
 	clientID := atomic.AddInt64(&p.nsqd.clientIDSequence, 1)
+	// 创建v2类型客户端
 	return newClientV2(clientID, conn, p.nsqd)
 }
 
@@ -41,6 +43,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 	var line []byte
 	var zeroTime time.Time
 
+	// 断言，失败panic，成功则赋值
 	client := c.(*clientV2)
 
 	// synchronize the startup of messagePump in order
@@ -53,6 +56,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 	<-messagePumpStartedChan
 
 	for {
+		// 根据心跳间隔设置下次读取的最长时间
 		if client.HeartbeatInterval > 0 {
 			client.SetReadDeadline(time.Now().Add(client.HeartbeatInterval * 2))
 		} else {
@@ -61,6 +65,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 
 		// ReadSlice does not allocate new space for the data each request
 		// ie. the returned slice is only valid until the next call to it
+		// 读取命令，异常退出
 		line, err = client.Reader.ReadSlice('\n')
 		if err != nil {
 			if err == io.EOF {
@@ -82,6 +87,8 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 		p.nsqd.logf(LOG_DEBUG, "PROTOCOL(V2): [%s] %s", client, params)
 
 		var response []byte
+
+		// 执行命令
 		response, err = p.Exec(client, params)
 		if err != nil {
 			ctx := ""
@@ -103,6 +110,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 			continue
 		}
 
+		// 响应结果
 		if response != nil {
 			err = p.Send(client, frameTypeResponse, response)
 			if err != nil {
@@ -112,6 +120,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 		}
 	}
 
+	// 关闭客户端连接
 	p.nsqd.logf(LOG_INFO, "PROTOCOL(V2): [%s] exiting ioloop", client)
 	close(client.ExitChan)
 	if client.Channel != nil {

@@ -24,7 +24,9 @@ type program struct {
 }
 
 func main() {
+	// 创建program实例
 	prg := &program{}
+	// 注册服务，然后会自动调用Init和Start函数
 	if err := svc.Run(prg, syscall.SIGINT, syscall.SIGTERM); err != nil {
 		logFatal("%s", err)
 	}
@@ -33,6 +35,7 @@ func main() {
 func (p *program) Init(env svc.Environment) error {
 	opts := nsqd.NewOptions()
 
+	// 解析命令行参数
 	flagSet := nsqdFlagSet(opts)
 	flagSet.Parse(os.Args[1:])
 
@@ -43,6 +46,7 @@ func (p *program) Init(env svc.Environment) error {
 		os.Exit(0)
 	}
 
+	// 加载校验配置文件
 	var cfg config
 	configFile := flagSet.Lookup("config").Value.String()
 	if configFile != "" {
@@ -53,8 +57,10 @@ func (p *program) Init(env svc.Environment) error {
 	}
 	cfg.Validate()
 
+	// 合并两者参数
 	options.Resolve(opts, flagSet, cfg)
 
+	// 初始化nsqd对象
 	nsqd, err := nsqd.New(opts)
 	if err != nil {
 		logFatal("failed to instantiate nsqd - %s", err)
@@ -65,16 +71,19 @@ func (p *program) Init(env svc.Environment) error {
 }
 
 func (p *program) Start() error {
+	// 加载历史元数据，如topic、channel相关
 	err := p.nsqd.LoadMetadata()
 	if err != nil {
 		logFatal("failed to load metadata - %s", err)
 	}
+	// 持久化最新元数据？此处存疑
 	err = p.nsqd.PersistMetadata()
 	if err != nil {
 		logFatal("failed to persist metadata - %s", err)
 	}
 
 	go func() {
+		// nsq，启动！
 		err := p.nsqd.Main()
 		if err != nil {
 			p.Stop()
@@ -86,6 +95,7 @@ func (p *program) Start() error {
 }
 
 func (p *program) Stop() error {
+	// 通过once实例确保只调用一次
 	p.once.Do(func() {
 		p.nsqd.Exit()
 	})
