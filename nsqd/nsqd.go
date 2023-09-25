@@ -662,6 +662,7 @@ func (n *NSQD) resizePool(num int, workCh chan *Channel, responseCh chan bool, c
 
 // queueScanWorker receives work (in the form of a channel) from queueScanLoop
 // and processes the deferred and in-flight queues
+// 队列处理协程
 func (n *NSQD) queueScanWorker(workCh chan *Channel, responseCh chan bool, closeCh chan int) {
 	for {
 		select {
@@ -698,17 +699,24 @@ func (n *NSQD) queueScanWorker(workCh chan *Channel, responseCh chan bool, close
 // If QueueScanDirtyPercent (default: 25%) of the selected channels were dirty,
 // the loop continues without sleep.
 func (n *NSQD) queueScanLoop() {
+	// 一次会选出一定数目的channel进行处理（默认20），这里先创建对应大小的chan
+	// 存放需要处理的channel到通道中，由queueScanWorker读出来依次进行处理
 	workCh := make(chan *Channel, n.getOpts().QueueScanSelectionCount)
+	// queueScanWorker如果确实有做什么工作，会将dirty=true发送到该通道，到达一定百分比后续不进入sleep，继续处理这些channel
 	responseCh := make(chan bool, n.getOpts().QueueScanSelectionCount)
 	closeCh := make(chan int)
 
+	// 扫描任务计时器，默认100ms
 	workTicker := time.NewTicker(n.getOpts().QueueScanInterval)
+	// queueScanWorker协程池调整计时器，默认5s
 	refreshTicker := time.NewTicker(n.getOpts().QueueScanRefreshInterval)
 
+	// 根据channel数目调整worker数目
 	channels := n.channels()
 	n.resizePool(len(channels), workCh, responseCh, closeCh)
 
 	for {
+		// 阻塞，等信号
 		select {
 		case <-workTicker.C:
 			if len(channels) == 0 {
@@ -728,10 +736,12 @@ func (n *NSQD) queueScanLoop() {
 		}
 
 	loop:
+		// 选出一定数目的channel对象，写入workCh
 		for _, i := range util.UniqRands(num, len(channels)) {
 			workCh <- channels[i]
 		}
 
+		// 读取对应次数responseCh
 		numDirty := 0
 		for i := 0; i < num; i++ {
 			if <-responseCh {
@@ -739,6 +749,7 @@ func (n *NSQD) queueScanLoop() {
 			}
 		}
 
+		// 一定数目的channel在工作，证明它们是活跃的, 不进入sleep，继续处理这批channel
 		if float64(numDirty)/float64(num) > n.getOpts().QueueScanDirtyPercent {
 			goto loop
 		}
