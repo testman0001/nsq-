@@ -252,7 +252,7 @@ func (n *NSQD) GetStartTime() time.Time {
 }
 
 func (n *NSQD) Main() error {
-	// 创建管道及异常处理函数，接收退出信息
+	// 创建退出通道及异常处理函数，接收退出信息
 	exitCh := make(chan error)
 	var once sync.Once
 	exitFunc := func(err error) {

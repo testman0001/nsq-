@@ -122,6 +122,7 @@ func (s ClientV2Stats) String() string {
 
 type clientV2 struct {
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
+	// ReadyCount是当前连接上能同时处理的消息数量
 	ReadyCount    int64
 	InFlightCount int64
 	MessageCount  uint64
@@ -141,7 +142,8 @@ type clientV2 struct {
 	net.Conn
 
 	// connections based on negotiated features
-	tlsConn     *tls.Conn
+	tlsConn *tls.Conn
+	// 压缩写入器， DEFLATE格式，常用来压缩网络协议
 	flateWriter *flate.Writer
 
 	// reading/writing interfaces
@@ -237,6 +239,7 @@ func (c *clientV2) Type() int {
 	return typeConsumer
 }
 
+// 认证接口
 func (c *clientV2) Identify(data identifyDataV2) error {
 	c.nsqd.logf(LOG_INFO, "[%s] IDENTIFY: %+v", c, data)
 
@@ -389,6 +392,12 @@ func (p *prettyConnectionState) GetVersion() string {
 	}
 }
 
+// 判断服务器是否能继续投递消息给客户端
+// 以下几种情况返回false：
+//
+//	1.订阅的channel已经暂停，不再接受消息, 没有消息来源当然投不了
+//	2.处理中的消息大于阈值
+//	3.阈值本身为不大于0，客户端不接收消息
 func (c *clientV2) IsReadyForMessages() bool {
 	if c.Channel.IsPaused() {
 		return false
@@ -399,6 +408,7 @@ func (c *clientV2) IsReadyForMessages() bool {
 
 	c.nsqd.logf(LOG_DEBUG, "[%s] state rdy: %4d inflt: %4d", c, readyCount, inFlightCount)
 
+	// 处理中消息达到阈值或者阈值本身不大于0， 返回false
 	if inFlightCount >= readyCount || readyCount <= 0 {
 		return false
 	}
@@ -427,6 +437,7 @@ func (c *clientV2) tryUpdateReadyState() {
 func (c *clientV2) FinishedMessage() {
 	atomic.AddUint64(&c.FinishCount, 1)
 	atomic.AddInt64(&c.InFlightCount, -1)
+	// 有条消息消费完了就更新状态，告知此时消息能继续投到缓冲区了
 	c.tryUpdateReadyState()
 }
 
@@ -616,6 +627,7 @@ func (c *clientV2) UpgradeSnappy() error {
 	return nil
 }
 
+// 将缓冲区的数据全部刷新到底层的io.Writer中
 func (c *clientV2) Flush() error {
 	var zeroTime time.Time
 	if c.HeartbeatInterval > 0 {

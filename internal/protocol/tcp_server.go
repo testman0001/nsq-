@@ -39,7 +39,7 @@ func TCPServer(listener net.Listener, handler TCPHandler, logf lg.AppLogFunc) er
 			break
 		}
 
-		// 对每个连接调用handle函数创建协程进行处理
+		// 对每个连接调用handle函数创建协程进行处理, nsq中下面Handle对应tcp.go中的Handle方法
 		wg.Add(1)
 		go func() {
 			handler.Handle(clientConn)

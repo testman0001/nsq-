@@ -97,6 +97,7 @@ func NewChannel(topicName string, channelName string, nsqd *NSQD,
 
 	c.initPQ()
 
+	// 临时channel，创建的是“假”后台队列，不进行持久化
 	if c.ephemeral {
 		c.backend = newDummyBackendQueue()
 	} else {
@@ -302,9 +303,12 @@ func (c *Channel) PutMessage(m *Message) error {
 	return nil
 }
 
+// 将消息投入channel
 func (c *Channel) put(m *Message) error {
 	select {
+	// 内存消息通道仅能容纳一条消息，先尝试直接写入
 	case c.memoryMsgChan <- m:
+	// 写不进则投到后台队列（磁盘队列）中
 	default:
 		err := writeMessageToBackend(m, c.backend)
 		c.nsqd.SetHealth(err)
@@ -347,6 +351,7 @@ func (c *Channel) TouchMessage(clientID int64, id MessageID, clientMsgTimeout ti
 }
 
 // FinishMessage successfully discards an in-flight message
+// 从处理中消息移除
 func (c *Channel) FinishMessage(clientID int64, id MessageID) error {
 	msg, err := c.popInFlightMessage(clientID, id)
 	if err != nil {
