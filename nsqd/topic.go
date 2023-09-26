@@ -46,7 +46,7 @@ func NewTopic(topicName string, nsqd *NSQD, deleteCallback func(*Topic)) *Topic 
 	t := &Topic{
 		name:              topicName,
 		channelMap:        make(map[string]*Channel),
-		memoryMsgChan:     make(chan *Message, nsqd.getOpts().MemQueueSize),
+		memoryMsgChan:     make(chan *Message, nsqd.getOpts().MemQueueSize), // 消息通道大小由参数mem-queue-size决定
 		startChan:         make(chan int, 1),
 		exitChan:          make(chan int),
 		channelUpdateChan: make(chan int),
@@ -54,21 +54,28 @@ func NewTopic(topicName string, nsqd *NSQD, deleteCallback func(*Topic)) *Topic 
 		paused:            0,
 		pauseChan:         make(chan int),
 		deleteCallback:    deleteCallback,
-		idFactory:         NewGUIDFactory(nsqd.getOpts().ID),
+		idFactory:         NewGUIDFactory(nsqd.getOpts().ID), // guid工厂，为消息生成唯一id
 	}
+	// 检查后缀是否带有临时标签
 	if strings.HasSuffix(topicName, "#ephemeral") {
 		t.ephemeral = true
+		// 创个假的后台队列，里面只有个可读通道
 		t.backend = newDummyBackendQueue()
 	} else {
 		dqLogf := func(level diskqueue.LogLevel, f string, args ...interface{}) {
 			opts := nsqd.getOpts()
 			lg.Logf(opts.Logger, opts.LogLevel, lg.LogLevel(level), f, args...)
 		}
+		// 创建磁盘队列
 		t.backend = diskqueue.New(
 			topicName,
+			// 数据存放路径
 			nsqd.getOpts().DataPath,
+			// 每个文件最大大小，默认100mb
 			nsqd.getOpts().MaxBytesPerFile,
+			// 最小消息长度26,16（id）+ 8（时间戳）+ 2（投递次数）
 			int32(minValidMsgLength),
+			// 最大消息长度pow（2，8）+ 26
 			int32(nsqd.getOpts().MaxMsgSize)+minValidMsgLength,
 			nsqd.getOpts().SyncEvery,
 			nsqd.getOpts().SyncTimeout,
@@ -78,6 +85,7 @@ func NewTopic(topicName string, nsqd *NSQD, deleteCallback func(*Topic)) *Topic 
 
 	t.waitGroup.Wrap(t.messagePump)
 
+	// 注册topic到lookupd
 	t.nsqd.Notify(t, !t.ephemeral)
 
 	return t
@@ -221,6 +229,7 @@ func (t *Topic) put(m *Message) error {
 	// If mem-queue-size == 0, avoid memory chan, for more consistent ordering,
 	// but try to use memory chan for deferred messages (they lose deferred timer
 	// in backend queue) or if topic is ephemeral (there is no backend queue).
+	// chan容量取决于mem-queue-sizee参数，如果不为0、临时topic、延时消息优先使用该通道
 	if cap(t.memoryMsgChan) > 0 || t.ephemeral || m.deferred != 0 {
 		select {
 		case t.memoryMsgChan <- m:
@@ -229,6 +238,7 @@ func (t *Topic) put(m *Message) error {
 			break // write to backend
 		}
 	}
+	// 写到后台队列
 	err := writeMessageToBackend(m, t.backend)
 	t.nsqd.SetHealth(err)
 	if err != nil {
@@ -240,12 +250,14 @@ func (t *Topic) put(m *Message) error {
 	return nil
 }
 
+// 获取消息数目
 func (t *Topic) Depth() int64 {
 	return int64(len(t.memoryMsgChan)) + t.backend.Depth()
 }
 
 // messagePump selects over the in-memory and backend queue and
 // writes messages to every channel for this topic
+// 将消息从topic的队列分发到channel的队列
 func (t *Topic) messagePump() {
 	var msg *Message
 	var buf []byte
@@ -255,6 +267,7 @@ func (t *Topic) messagePump() {
 	var backendChan <-chan []byte
 
 	// do not pass messages before Start(), but avoid blocking Pause() or GetChannel()
+	// 等待topic启动信号
 	for {
 		select {
 		case <-t.channelUpdateChan:
@@ -279,6 +292,7 @@ func (t *Topic) messagePump() {
 
 	// main message loop
 	for {
+		// 从topic的内存通道和后台队列通道中取出消息
 		select {
 		case msg = <-memoryMsgChan:
 		case buf = <-backendChan:
@@ -321,11 +335,13 @@ func (t *Topic) messagePump() {
 			// needs a unique instance but...
 			// fastpath to avoid copy if its the first channel
 			// (the topic already created the first copy)
+			// 除了第一个channel，其他的channel都需要复制一份message
 			if i > 0 {
 				chanMsg = NewMessage(msg.ID, msg.Body)
 				chanMsg.Timestamp = msg.Timestamp
 				chanMsg.deferred = msg.deferred
 			}
+			// 判断是否需要放到延迟队列
 			if chanMsg.deferred != 0 {
 				channel.PutMessageDeferred(chanMsg, chanMsg.deferred)
 				continue
@@ -354,6 +370,7 @@ func (t *Topic) Close() error {
 }
 
 func (t *Topic) exit(deleted bool) error {
+	// 判断是否退出中，是则退出，否则置为1
 	if !atomic.CompareAndSwapInt32(&t.exitFlag, 0, 1) {
 		return errors.New("exiting")
 	}
@@ -373,8 +390,10 @@ func (t *Topic) exit(deleted bool) error {
 	// synchronize the close of messagePump()
 	t.waitGroup.Wait()
 
+	// topic需要删除
 	if deleted {
 		t.Lock()
+		// channel全部删除
 		for _, channel := range t.channelMap {
 			delete(t.channelMap, channel.name)
 			channel.Delete()
@@ -382,7 +401,9 @@ func (t *Topic) exit(deleted bool) error {
 		t.Unlock()
 
 		// empty the queue (deletes the backend files, too)
+		// topic清空
 		t.Empty()
+		// 删除后台队列
 		return t.backend.Delete()
 	}
 
@@ -402,6 +423,7 @@ func (t *Topic) exit(deleted bool) error {
 	return t.backend.Close()
 }
 
+// 把内存通道和后台队列里的消息全读完，并且删除后台队列的所有磁盘文件
 func (t *Topic) Empty() error {
 	for {
 		select {
@@ -415,6 +437,7 @@ finish:
 	return t.backend.Empty()
 }
 
+// 把内存队列通道里的消息刷到后台队列
 func (t *Topic) flush() error {
 	if len(t.memoryMsgChan) > 0 {
 		t.nsqd.logf(LOG_INFO,
@@ -439,6 +462,7 @@ finish:
 	return nil
 }
 
+// 统计channel端到端处理延时
 func (t *Topic) AggregateChannelE2eProcessingLatency() *quantile.Quantile {
 	var latencyStream *quantile.Quantile
 	t.RLock()

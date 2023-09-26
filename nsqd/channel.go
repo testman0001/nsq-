@@ -306,7 +306,7 @@ func (c *Channel) PutMessage(m *Message) error {
 // 将消息投入channel
 func (c *Channel) put(m *Message) error {
 	select {
-	// 内存消息通道仅能容纳一条消息，先尝试直接写入
+	// 内存消息通道仅能容纳MemQueueSize条消息，先尝试直接写入
 	case c.memoryMsgChan <- m:
 	// 写不进则投到后台队列（磁盘队列）中
 	default:
