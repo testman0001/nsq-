@@ -21,6 +21,7 @@ func connectCallback(n *NSQD, hostname string) func(*lookupPeer) {
 		ci["hostname"] = hostname
 		ci["broadcast_address"] = n.getOpts().BroadcastAddress
 
+		// 首先做身份认证
 		cmd, err := nsq.Identify(ci)
 		if err != nil {
 			lp.Close()
@@ -37,6 +38,7 @@ func connectCallback(n *NSQD, hostname string) func(*lookupPeer) {
 			return
 		}
 
+		// 解析响应数据
 		err = json.Unmarshal(resp, &lp.Info)
 		if err != nil {
 			n.logf(LOG_ERROR, "LOOKUPD(%s): parsing response - %s", lp, resp)
@@ -49,6 +51,7 @@ func connectCallback(n *NSQD, hostname string) func(*lookupPeer) {
 		}
 
 		// build all the commands first so we exit the lock(s) as fast as possible
+		// 注册topic和channel到lookupd
 		var commands []*nsq.Command
 		n.RLock()
 		for _, topic := range n.topicMap {
@@ -75,6 +78,7 @@ func connectCallback(n *NSQD, hostname string) func(*lookupPeer) {
 	}
 }
 
+// 循环反馈topic、channel信息给lookupd
 func (n *NSQD) lookupLoop() {
 	var lookupPeers []*lookupPeer
 	var lookupAddrs []string
@@ -90,6 +94,7 @@ func (n *NSQD) lookupLoop() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
+		// 先连上所有lookupd对端
 		if connect {
 			for _, host := range n.getOpts().NSQLookupdTCPAddresses {
 				if in(host, lookupAddrs) {
@@ -109,6 +114,7 @@ func (n *NSQD) lookupLoop() {
 		select {
 		case <-ticker.C:
 			// send a heartbeat and read a response (read detects closed conns)
+			// 定时发心跳给lookupd
 			for _, lookupPeer := range lookupPeers {
 				n.logf(LOG_DEBUG, "LOOKUPD(%s): sending heartbeat", lookupPeer)
 				cmd := nsq.Ping()
@@ -118,9 +124,11 @@ func (n *NSQD) lookupLoop() {
 				}
 			}
 		case val := <-n.notifyChan:
+			// 接收到topic或channel的变动通知
 			var cmd *nsq.Command
 			var branch string
 
+			// 生成要发给lookupd的命令
 			switch val := val.(type) {
 			case *Channel:
 				// notify all nsqlookupds that a new channel exists, or that it's removed
@@ -142,6 +150,7 @@ func (n *NSQD) lookupLoop() {
 				}
 			}
 
+			// 发送给所有peer去执行
 			for _, lookupPeer := range lookupPeers {
 				n.logf(LOG_INFO, "LOOKUPD(%s): %s %s", lookupPeer, branch, cmd)
 				_, err := lookupPeer.Command(cmd)
@@ -150,6 +159,7 @@ func (n *NSQD) lookupLoop() {
 				}
 			}
 		case <-n.optsNotificationChan:
+			// 配置项发生变更，剔除不应该存在的peer，并触发连接流程
 			var tmpPeers []*lookupPeer
 			var tmpAddrs []string
 			for _, lp := range lookupPeers {

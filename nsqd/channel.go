@@ -153,10 +153,12 @@ func (c *Channel) Close() error {
 	return c.exit(false)
 }
 
+// channel退出，传参代表是否要删除channel，反之代表持久化
 func (c *Channel) exit(deleted bool) error {
 	c.exitMutex.Lock()
 	defer c.exitMutex.Unlock()
 
+	// 判断是否已经在退出过程中
 	if !atomic.CompareAndSwapInt32(&c.exitFlag, 0, 1) {
 		return errors.New("exiting")
 	}
@@ -193,7 +195,9 @@ func (c *Channel) Empty() error {
 	c.Lock()
 	defer c.Unlock()
 
+	// 通过重新初始化队列来清空？
 	c.initPQ()
+	// 所有客户端处理中消息数目清零
 	for _, client := range c.clients {
 		client.Empty()
 	}
@@ -212,6 +216,7 @@ finish:
 
 // flush persists all the messages in internal memory buffers to the backend
 // it does not drain inflight/deferred because it is only called in Close()
+// 消息持久化到磁盘
 func (c *Channel) flush() error {
 	if len(c.memoryMsgChan) > 0 || len(c.inFlightMessages) > 0 || len(c.deferredMessages) > 0 {
 		c.nsqd.logf(LOG_INFO, "CHANNEL(%s): flushing %d memory %d in-flight %d deferred messages to backend",
@@ -303,7 +308,7 @@ func (c *Channel) PutMessage(m *Message) error {
 	return nil
 }
 
-// 将消息投入channel
+// 将消息投入通道
 func (c *Channel) put(m *Message) error {
 	select {
 	// 内存消息通道仅能容纳MemQueueSize条消息，先尝试直接写入
@@ -327,11 +332,15 @@ func (c *Channel) PutMessageDeferred(msg *Message, timeout time.Duration) {
 }
 
 // TouchMessage resets the timeout for an in-flight message
+// 重置处理中消息的超时时间
 func (c *Channel) TouchMessage(clientID int64, id MessageID, clientMsgTimeout time.Duration) error {
+	// 根据id查找消息
 	msg, err := c.popInFlightMessage(clientID, id)
 	if err != nil {
 		return err
 	}
+	// 从处理中队列移除，后面再添加，不直接改超时时间（prj）是因为会破坏优先队列的最小堆结构
+	// 为什么不直接改了再通过down、up进行调整呢？这样开销应该更小吧
 	c.removeFromInFlightPQ(msg)
 
 	newTimeout := time.Now().Add(clientMsgTimeout)
@@ -342,10 +351,12 @@ func (c *Channel) TouchMessage(clientID int64, id MessageID, clientMsgTimeout ti
 	}
 
 	msg.pri = newTimeout.UnixNano()
+	// 加到字典中
 	err = c.pushInFlightMessage(msg)
 	if err != nil {
 		return err
 	}
+	// 加到优先队列中
 	c.addToInFlightPQ(msg)
 	return nil
 }
@@ -370,6 +381,8 @@ func (c *Channel) FinishMessage(clientID int64, id MessageID) error {
 // `timeoutMs`  > 0 - asynchronously wait for the specified timeout
 //
 //	and requeue a message (aka "deferred requeue")
+//
+// 延迟消息入队
 func (c *Channel) RequeueMessage(clientID int64, id MessageID, timeout time.Duration) error {
 	// remove from inflight first
 	msg, err := c.popInFlightMessage(clientID, id)
@@ -453,6 +466,7 @@ func (c *Channel) StartInFlightTimeout(msg *Message, clientID int64, timeout tim
 	now := time.Now()
 	msg.clientID = clientID
 	msg.deliveryTS = now
+	// 以当前时间作为优先级
 	msg.pri = now.Add(timeout).UnixNano()
 	err := c.pushInFlightMessage(msg)
 	if err != nil {
@@ -463,6 +477,7 @@ func (c *Channel) StartInFlightTimeout(msg *Message, clientID int64, timeout tim
 }
 
 func (c *Channel) StartDeferredTimeout(msg *Message, timeout time.Duration) error {
+	// 加上超时得到绝对时间作为优先级
 	absTs := time.Now().Add(timeout).UnixNano()
 	item := &pqueue.Item{Value: msg, Priority: absTs}
 	err := c.pushDeferredMessage(item)
@@ -553,6 +568,7 @@ func (c *Channel) addToDeferredPQ(item *pqueue.Item) {
 	c.deferredMutex.Unlock()
 }
 
+// 循环处理延时消息队列
 func (c *Channel) processDeferredQueue(t int64) bool {
 	c.exitMutex.RLock()
 	defer c.exitMutex.RUnlock()
@@ -584,6 +600,7 @@ exit:
 	return dirty
 }
 
+// 循环处理处理中消息队列
 func (c *Channel) processInFlightQueue(t int64) bool {
 	c.exitMutex.RLock()
 	defer c.exitMutex.RUnlock()
@@ -595,6 +612,7 @@ func (c *Channel) processInFlightQueue(t int64) bool {
 	dirty := false
 	for {
 		c.inFlightMutex.Lock()
+		// 按优先级取出优先级高于t的消息，t是传的当前时间，也就是时间早于当前时间的消息
 		msg, _ := c.inFlightPQ.PeekAndShift(t)
 		c.inFlightMutex.Unlock()
 

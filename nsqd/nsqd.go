@@ -65,7 +65,7 @@ type NSQD struct {
 
 	poolSize int
 
-	notifyChan           chan interface{}      // 向所有nsqlookupd发送topic相关消息
+	notifyChan           chan interface{}      // 用来向所有nsqlookupd发送topic、channel相关变动消息
 	optsNotificationChan chan struct{}         // 传递nsqlookupd变化的消息
 	exitChan             chan int              // 传递退出消息
 	waitGroup            util.WaitGroupWrapper //Exit函数中通过waitGroup.Wait()等待所有协程退出，每个协程启动时由wrapper加入

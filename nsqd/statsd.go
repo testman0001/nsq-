@@ -1,3 +1,4 @@
+// 将nsqd的状态信息通过udp发送到指定位置
 package nsqd
 
 import (

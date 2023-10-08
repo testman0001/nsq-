@@ -1,3 +1,4 @@
+// 获取topic、channel、producer状态
 package nsqd
 
 import (

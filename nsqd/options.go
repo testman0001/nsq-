@@ -1,3 +1,4 @@
+// 定义配置项，有些默认值可以在此看到
 package nsqd
 
 import (
