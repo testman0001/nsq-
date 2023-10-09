@@ -9,11 +9,12 @@ import (
 
 type RegistrationDB struct {
 	sync.RWMutex
+	// 存储是Registration-ProducerMap形式
 	registrationMap map[Registration]ProducerMap
 }
 
 type Registration struct {
-	Category string
+	Category string //类别，包括topic，channel，具体为{"topic", topicName, ""}或{"channel", topicName, channelName}
 	Key      string
 	SubKey   string
 }
@@ -43,11 +44,13 @@ func (p *Producer) String() string {
 	return fmt.Sprintf("%s [%d, %d]", p.peerInfo.BroadcastAddress, p.peerInfo.TCPPort, p.peerInfo.HTTPPort)
 }
 
+// 给生产者立碑
 func (p *Producer) Tombstone() {
 	p.tombstoned = true
 	p.tombstonedAt = time.Now()
 }
 
+// 是否立碑且时间超过了传参lifetime
 func (p *Producer) IsTombstoned(lifetime time.Duration) bool {
 	return p.tombstoned && time.Since(p.tombstonedAt) < lifetime
 }
@@ -116,6 +119,7 @@ func (r *RegistrationDB) needFilter(key string, subkey string) bool {
 func (r *RegistrationDB) FindRegistrations(category string, key string, subkey string) Registrations {
 	r.RLock()
 	defer r.RUnlock()
+	// 不包含正则，直接通过key查找
 	if !r.needFilter(key, subkey) {
 		k := Registration{category, key, subkey}
 		if _, ok := r.registrationMap[k]; ok {
@@ -123,6 +127,7 @@ func (r *RegistrationDB) FindRegistrations(category string, key string, subkey s
 		}
 		return Registrations{}
 	}
+	// 包含正则，通过匹配函数进一步判断
 	results := Registrations{}
 	for k := range r.registrationMap {
 		if !k.IsMatch(category, key, subkey) {
